@@ -62,6 +62,7 @@ export default function getPathFromState(
     let route = current.routes[index] as Route<string> & {
       state?: State;
     };
+
     let currentOptions = options;
     let pattern = route.name;
     // we keep all the route names that appeared during going deeper in config in case the pattern is resolved to undefined
@@ -94,6 +95,7 @@ export default function getPathFromState(
             const deeperConfig = (currentOptions[route.name] as {
               screens: Options;
             }).screens;
+
             // if there is config for next route name, we go deeper
             if (nextRoute.name in deeperConfig) {
               nestedRouteNames = `${nestedRouteNames}/${route.name}`;
@@ -143,11 +145,13 @@ export default function getPathFromState(
             // Remove the used value from the params object since we'll use the rest for query string
             // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
             delete params[name];
+
             return encodeURIComponent(value);
           } else if (p.endsWith('?')) {
             // optional params without value assigned in route.params should be ignored
             return '';
           }
+
           return encodeURIComponent(p);
         })
         .join('/');

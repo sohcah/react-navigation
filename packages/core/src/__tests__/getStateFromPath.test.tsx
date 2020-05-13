@@ -1777,3 +1777,41 @@ it('handle optional params in the beginning v2', () => {
     state
   );
 });
+
+it('merges parent patterns if needed', () => {
+  const path = 'foo/42/baz/babel';
+
+  const config = {
+    Foo: {
+      path: 'foo/:bar',
+      parse: {
+        bar: Number,
+      },
+      screens: {
+        Baz: 'baz/:qux',
+      },
+    },
+  };
+
+  const state = {
+    routes: [
+      {
+        name: 'Foo',
+        params: { bar: 42 },
+        state: {
+          routes: [
+            {
+              name: 'Baz',
+              params: { qux: 'babel' },
+            },
+          ],
+        },
+      },
+    ],
+  };
+
+  expect(getStateFromPath(path, config)).toEqual(state);
+  expect(getStateFromPath(getPathFromState(state, config), config)).toEqual(
+    state
+  );
+});

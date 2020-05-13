@@ -21,8 +21,8 @@ type Options = {
 
 type RouteConfig = {
   screen: string;
-  match: RegExp | null;
-  pattern: string;
+  regexes: RegExp[];
+  patterns: string[];
   routeNames: string[];
   parse: ParseConfig | undefined;
 };
@@ -64,14 +64,15 @@ export default function getStateFromPath(
   // Create a normalized configs array which will be easier to use
   const configs = ([] as RouteConfig[]).concat(
     ...Object.keys(options).map((key) =>
-      createNormalizedConfigs(key, options, [], initialRoutes)
+      createNormalizedConfigs(key, options, [], initialRoutes, [])
     )
   );
 
   // sort configs so the most exhaustive is always first to be chosen
   configs.sort(
     (config1, config2) =>
-      config2.pattern.split('/').length - config1.pattern.split('/').length
+      config2.patterns[0].split('/').length -
+      config1.patterns[0].split('/').length
   );
 
   let remaining = path
@@ -87,18 +88,20 @@ export default function getStateFromPath(
     // When handling empty path, we should only look at the root level config
     const match = configs.find(
       (config) =>
-        config.pattern === '' &&
-        config.routeNames.every(
-          // make sure that none of the parent configs have a non-empty path defined
-          (name) => !configs.find((c) => c.screen === name)?.pattern
-        )
+        // make sure that neither this or none of the parent configs have a non-empty path defined
+        config.patterns.filter(Boolean).length === 0
     );
 
     if (match) {
       return createNestedStateObject(
-        match.routeNames,
-        initialRoutes,
-        parseQueryParams(path, match.parse)
+        match.routeNames.map((name, i, self) => {
+          if (i === self.length - 1) {
+            return { name, params: parseQueryParams(path, match.parse) };
+          }
+
+          return { name };
+        }),
+        initialRoutes
       );
     }
 
@@ -110,35 +113,39 @@ export default function getStateFromPath(
 
   while (remaining) {
     let routeNames: string[] | undefined;
-    let params: Record<string, any> | undefined;
+    let allParams: Record<string, any> | undefined;
 
     // Go through all configs, and see if the next path segment matches our regex
     for (const config of configs) {
-      if (!config.match) {
+      if (!config.regexes.length) {
         continue;
       }
 
-      const match = remaining.match(config.match);
+      let match: RegExpMatchArray | undefined | null;
+      let pattern: string | undefined;
+
+      for (let i = 0; i < config.regexes.length; i++) {
+        match = remaining.match(config.regexes[i]);
+
+        if (match) {
+          pattern = config.patterns[i];
+          break;
+        }
+      }
 
       // If our regex matches, we need to extract params from the path
       if (match) {
         routeNames = [...config.routeNames];
 
-        const paramPatterns = config.pattern
+        const paramPatterns = pattern!
           .split('/')
           .filter((p) => p.startsWith(':'));
 
         if (paramPatterns.length) {
-          params = paramPatterns.reduce<Record<string, any>>((acc, p, i) => {
-            const key = p.replace(/^:/, '').replace(/\?$/, '');
-            const value = match[(i + 1) * 2].replace(/\//, ''); // The param segments appear every second item starting from 2 in the regex match result
+          allParams = paramPatterns.reduce<Record<string, any>>((acc, p, i) => {
+            const value = match![(i + 1) * 2].replace(/\//, ''); // The param segments appear every second item starting from 2 in the regex match result
 
-            if (value) {
-              acc[key] =
-                config.parse && config.parse[key]
-                  ? config.parse[key](value)
-                  : value;
-            }
+            acc[p] = value;
 
             return acc;
           }, {});
@@ -159,7 +166,46 @@ export default function getStateFromPath(
       remaining = segments.join('/');
     }
 
-    const state = createNestedStateObject(routeNames, initialRoutes, params);
+    const state = createNestedStateObject(
+      routeNames.map((name) => {
+        const config = configs.find((c) => c.screen === name);
+
+        let params: object | undefined;
+
+        if (allParams && config?.patterns.length) {
+          const pattern = config.patterns[config.patterns.length - 1];
+
+          if (pattern) {
+            const paramPatterns = pattern!
+              .split('/')
+              .filter((p) => p.startsWith(':'));
+
+            if (paramPatterns.length) {
+              params = paramPatterns.reduce<Record<string, any>>((acc, p) => {
+                const key = p.replace(/^:/, '').replace(/\?$/, '');
+                const value = allParams![p];
+
+                if (value) {
+                  acc[key] =
+                    config.parse && config.parse[key]
+                      ? config.parse[key](value)
+                      : value;
+                }
+
+                return acc;
+              }, {});
+            }
+          }
+        }
+
+        if (params && Object.keys(params).length) {
+          return { name, params };
+        }
+
+        return { name };
+      }),
+      initialRoutes
+    );
 
     if (current) {
       // The state should be nested inside the deepest route we parsed before
@@ -194,11 +240,20 @@ export default function getStateFromPath(
   return result;
 }
 
+function joinPaths(...paths: string[]): string {
+  return paths
+    .map((p) => p.split('/'))
+    .flat()
+    .filter(Boolean)
+    .join('/');
+}
+
 function createNormalizedConfigs(
   key: string,
   routeConfig: Options,
   routeNames: string[] = [],
-  initials: InitialRouteConfig[]
+  initials: InitialRouteConfig[],
+  parentPatterns: string[]
 ): RouteConfig[] {
   const configs: RouteConfig[] = [];
 
@@ -208,13 +263,25 @@ function createNormalizedConfigs(
 
   if (typeof value === 'string') {
     // If a string is specified as the value of the key(e.g. Foo: '/path'), use it as the pattern
-    configs.push(createConfigItem(key, routeNames, value));
+    const patterns = parentPatterns
+      .map((p) => joinPaths(p, value))
+      .concat(value);
+
+    configs.push(createConfigItem(key, routeNames, patterns));
   } else if (typeof value === 'object') {
+    let patterns: string[];
+
     // if an object is specified as the value (e.g. Foo: { ... }),
     // it can have `path` property and
     // it could have `screens` prop which has nested configs
     if (typeof value.path === 'string') {
-      configs.push(createConfigItem(key, routeNames, value.path, value.parse));
+      patterns = parentPatterns
+        .map((p) => joinPaths(p, value.path as string))
+        .concat(value.path);
+
+      configs.push(createConfigItem(key, routeNames, patterns, value.parse));
+    } else {
+      patterns = [];
     }
 
     if (value.screens) {
@@ -230,7 +297,8 @@ function createNormalizedConfigs(
           nestedConfig,
           value.screens as Options,
           routeNames,
-          initials
+          initials,
+          patterns
         );
         configs.push(...result);
       });
@@ -245,12 +313,13 @@ function createNormalizedConfigs(
 function createConfigItem(
   screen: string,
   routeNames: string[],
-  pattern: string,
+  patterns: string[],
   parse?: ParseConfig
 ): RouteConfig {
-  const match = pattern
-    ? new RegExp(
-        `^(${pattern
+  const match = patterns.filter(Boolean).map(
+    (p) =>
+      new RegExp(
+        `^(${p
           .split('/')
           .map((it) => {
             if (it.startsWith(':')) {
@@ -261,12 +330,12 @@ function createConfigItem(
           })
           .join('')})`
       )
-    : null;
+  );
 
   return {
     screen,
-    match,
-    pattern,
+    regexes: match,
+    patterns,
     // The routeNames array is mutated, so copy it to keep the current state
     routeNames: [...routeNames],
     parse,
@@ -305,21 +374,18 @@ function findInitialRoute(
 function createStateObject(
   initialRoute: string | undefined,
   routeName: string,
-  isEmpty: boolean,
-  params?: Record<string, any> | undefined
+  params: Record<string, any> | undefined,
+  isEmpty: boolean
 ): InitialState {
   if (isEmpty) {
     if (initialRoute) {
       return {
         index: 1,
-        routes: [
-          { name: initialRoute },
-          { name: routeName as string, ...(params && { params }) },
-        ],
+        routes: [{ name: initialRoute }, { name: routeName as string, params }],
       };
     } else {
       return {
-        routes: [{ name: routeName as string, ...(params && { params }) }],
+        routes: [{ name: routeName as string, params }],
       };
     }
   } else {
@@ -328,44 +394,50 @@ function createStateObject(
         index: 1,
         routes: [
           { name: initialRoute },
-          { name: routeName as string, state: { routes: [] } },
+          { name: routeName as string, params, state: { routes: [] } },
         ],
       };
     } else {
-      return { routes: [{ name: routeName as string, state: { routes: [] } }] };
+      return {
+        routes: [{ name: routeName as string, params, state: { routes: [] } }],
+      };
     }
   }
 }
 
 function createNestedStateObject(
-  routeNames: string[],
-  initialRoutes: InitialRouteConfig[],
-  params: object | undefined
+  routes: { name: string; params?: object }[],
+  initialRoutes: InitialRouteConfig[]
 ) {
   let state: InitialState;
-  let routeName = routeNames.shift() as string;
-  let initialRoute = findInitialRoute(routeName, initialRoutes);
+  let route = routes.shift() as { name: string; params?: object };
+  let initialRoute = findInitialRoute(route.name, initialRoutes);
 
   state = createStateObject(
     initialRoute,
-    routeName,
-    routeNames.length === 0,
-    params
+    route.name,
+    route.params,
+    routes.length === 0
   );
 
-  if (routeNames.length > 0) {
+  if (routes.length > 0) {
     let nestedState = state;
 
-    while ((routeName = routeNames.shift() as string)) {
-      initialRoute = findInitialRoute(routeName, initialRoutes);
-      nestedState.routes[nestedState.index || 0].state = createStateObject(
+    while ((route = routes.shift() as { name: string; params?: object })) {
+      initialRoute = findInitialRoute(route.name, initialRoutes);
+
+      const nestedStateIndex =
+        nestedState.index || nestedState.routes.length - 1;
+
+      nestedState.routes[nestedStateIndex].state = createStateObject(
         initialRoute,
-        routeName,
-        routeNames.length === 0,
-        params
+        route.name,
+        route.params,
+        routes.length === 0
       );
-      if (routeNames.length > 0) {
-        nestedState = nestedState.routes[nestedState.index || 0]
+
+      if (routes.length > 0) {
+        nestedState = nestedState.routes[nestedStateIndex]
           .state as InitialState;
       }
     }
