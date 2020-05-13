@@ -75,6 +75,7 @@ function MaterialBottomTabViewInner({
                 <Link
                   {...rest}
                   // @ts-ignore
+                  style={[{ display: "flex", justifyContent: "center" }, rest.style]}
                   to={buildLink(route.name, route.params)}
                   accessibilityRole="link"
                   onPress={(e: any) => {
